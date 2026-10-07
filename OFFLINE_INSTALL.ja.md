@@ -34,7 +34,7 @@ setup.py がネットから取るものと、オフラインでの渡し方の�
 | llama.cpp ソース zip | GitHub | `third_party\` に zip と `.done` を置く |
 | エンジン zip | GitHub release | `--prebuilt <フォルダ>` |
 | モデル GGUF | Hugging Face | `Strata-data\models\<サイズ>\` に置く |
-| 画像エンコーダ（mmproj、画像を使う場合だけ） | Hugging Face | `Strata-data\models\` に置き `.done` を作る |
+| 画像エンコーダ（mmproj） | Hugging Face | `Strata-data\models\` に置き `.done` を作る |
 | MTP ドラフト層（約 6.5 GB） | Qwen の元チェックポイント | `Strata-data\mtp\` ごとコピー |
 
 起動後のサーバーは、画像を URL で渡されたとき以外はネットに出ません。
@@ -50,8 +50,8 @@ setup.py がネットから取るものと、オフラインでの渡し方の�
 | GPU 世代（compute capability） | sm_120 | sm_89 | sm_86 |
 | エンジン | `strata-windows-x64.zip` | 同左 | 同左 |
 | モデル（`--model`） | **IQ2_XS** | **IQ3_S** | **IQ3_S** |
-| コンテキスト（`--context`） | 131072（128K） | 65536（64K） | 32768（32K） |
-| 画像 | 使わない（`--vision no`） | 同左 | 同左 |
+| コンテキスト（`--context`） | **204800**（200K） | 同左 | 同左 |
+| 画像 | **使う**（`--vision yes`、GPU で処理） | 同左 | 同左 |
 
 ※ RTX 2000 Ada は 16 GB の製品しか無いので、12 GB の機種は Ampere 世代の **RTX A2000 12GB** と想定しています。
 どちらの世代でも v0.1.40.2 のエンジン（対応: sm_75 / 86 / 89 / 120）で動きます。実機では次のコマンドで確認してください。
@@ -67,13 +67,32 @@ nvidia-smi --query-gpu=name,memory.total,compute_cap,driver_version --format=csv
     `--yes` だけにすると、setup は RAM 60 GB 以上で IQ3_XXS を選ぶので、`--model` は必ず指定してください。
   - 96 GB 以上は IQ3_S（公開ベンチマークで元のモデルと同等の品質）。
   - Unsloth の UD-IQ4_XS（94 GB）も 256 GB なら選べますが、この手順では扱いません。
-- **コンテキスト**: setup の推奨値に合わせています。VRAM が 14 GB 未満なら 32K、20 GB 未満なら 64K、それ以上なら 128K です。
-  長くするほど KV キャッシュが VRAM を使い、GPU に載るエキスパートが減ります。
-- **画像**: 使うなら mmproj（0.9 GB）を追加で集めて `--vision yes` にします（[付録B](#付録b-画像を使う場合)）。
-  VRAM を約 1.4 GB 使うため、12 GB のタイプC では勧めません。
+- **コンテキスト**: 必要条件が「160000 以上」なので、それを満たす setup の選択肢の **204800（200K）** にします。
+  - モデルの学習時の長さ 262144 より短いので、RoPE スケーリングは入りません。262144 を超えると、実験的な拡張が入ります。
+  - setup の推奨値（VRAM が 14 GB 未満なら 32K、20 GB 未満なら 64K、それ以上なら 128K）より長いので、
+    `--context` で必ず指定します。指定した値はそのまま使われます。
+  - `--context 163840` のように、選択肢に無い値も受け付けます。
+- **長いコンテキストと VRAM**: 64K 以上では、setup が KV ストリーミングを有効にします。
+  - KV キャッシュの本体を RAM に置き、VRAM には注意機構が読む部分（各層 32K 位置分）だけを置く方式です。
+    そのため、コンテキストを長くしても VRAM の使用はほとんど増えません。
+  - RAM は、8-bit KV の 200K で約 2.8 GB 増えます。
+  - setup が有効にする条件は「RAM ≧ モデルの必要 RAM + KV の RAM + 1 GB」です。どのタイプも満たします。
+    - タイプA（IQ2_XS）: 48 + 2.8 + 1 = 51.8 GB ≦ 64 GB
+    - タイプB・C（IQ3_S）: 62 + 2.8 + 1 = 65.8 GB ≦ 256 GB
+  - IQ3_S の RAM の見積もり（エキスパート 50.3 GB + KV 2.8 GB + 余裕 24 GB = 約 77 GB）も 256 GB に収まるので、
+    setup は警告を出しません。
+- **画像**: 画像エンコーダ（mmproj、0.9 GB）を集めて `--vision yes` にします。
+  - エンコーダは GPU で動きます。エンジン zip の画像エンコーダは sm_86 / 89 / 120 に対応しています。
+  - 画像エンコーダ用に VRAM を約 1.4 GB 空けておくため、GPU に載るエキスパートが減り、文章の出力は数 % 遅くなります
+    （setup の説明）。
 
-モデルの公表速度は RTX 5070（12 GB）+ Ryzen 5 7600 + 64 GB RAM で測った値です（[docs/MODELS.md](MODELS.md)）。
-上の3タイプの PC では測っていません。
+参考になる実測値（[docs/DETAILS.md](DETAILS.md)）:
+
+- RTX 5070（12 GB）+ Ryzen 5 7600 + 64 GB RAM、IQ2_XS、262K のプロンプト（エンジン 0.1.22）で、
+  - 出力 52.8 tokens/s
+  - プロンプトの読み込み 1,181 tokens/s（画像をオンにした状態で測った値）
+- IQ3_S の 128K を超える長さは、プロジェクトでは測っていません（64 GB の PC で 256K を動かした利用者の報告はあります。#406）。
+- 上の3タイプの PC では、どれも測っていません。
 
 ---
 
@@ -85,7 +104,7 @@ nvidia-smi --query-gpu=name,memory.total,compute_cap,driver_version --format=csv
 - **Python 3.12**（オフラインPCと同じマイナーバージョン。wheel が `cp312` 用になるため）。以下では `C:\Python312`
   にあるものとして、フルパスで呼びます（2.2 を参照）
 - curl（Windows 10/11 に標準で入っています）
-- 外付けディスク: IQ2_XS と IQ3_S の両方を集めると約 **135 GB**
+- 外付けディスク: IQ2_XS と IQ3_S の両方と画像エンコーダを集めると約 **136 GB**
 
 以下では、外付けディスクを `E:`、作業フォルダを `E:\StrataOffline` とします。
 
@@ -100,6 +119,7 @@ E:\StrataOffline\
   05_engine\   strata-windows-x64.zip
   06_wheels\   *.whl（18 個）
   07_models\
+     mmproj-Qwen3.8-Flash-Next-BF16.gguf   （画像エンコーダ。全タイプ共通）
      IQ2_XS\   Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00001-of-00002.gguf
                Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00002-of-00002.gguf
      IQ3_S\    Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf
@@ -220,6 +240,13 @@ curl -L -C - -O %R%/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf
 copy E:\StrataOffline\07_models\IQ2_XS\Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00002-of-00002.gguf Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf
 ```
 
+**画像エンコーダ（全タイプ共通）**
+
+```bat
+cd /d E:\StrataOffline\07_models
+curl -L -C - -O %R%/mmproj-Qwen3.8-Flash-Next-BF16.gguf
+```
+
 **shard 2 は、どのサイズでも中身が同じファイル**です（SHA-256 が一致。setup.py も同一ファイルとして扱います）。
 IQ2_XS の shard 2 をコピーして名前を変えれば、もう一度落とす必要はありません。`-C -` を付けると、途中で切れた
 ダウンロードを続きから再開できます。
@@ -229,6 +256,7 @@ IQ2_XS の shard 2 をコピーして名前を変えれば、もう一度落と�
 | `IQ2_XS/…-IQ2_XS-00001-of-00002.gguf` | 39,225,954,592 | `92cee27ae5bbadcd732416a0f7a7f0acc092399dbbe8f5a5efa707c2ec0a49d7` |
 | `IQ3_S/…-IQ3_S-00001-of-00002.gguf` | 54,817,524,224 | `4c1eb2ceb4915e1192f4f386021897bde56a97f40a0bb78bb86465e0f7d2aca3` |
 | `…-00002-of-00002.gguf`（全サイズ共通） | 28,800,138,432 | `316b46f3a2dbd68c900f43136ab9449f9dcc3725dfd8c794847c204bc161e113` |
+| `mmproj-Qwen3.8-Flash-Next-BF16.gguf`（画像エンコーダ） | 907,543,008 | `b1a82259702816a5330d7bd7607cd9676b11780e79ff7348c21103ff3ce49bd0` |
 | （参考）`IQ3_XXS/…-IQ3_XXS-00001-of-00002.gguf` | 47,039,860,096 | `219ea929900dfa9ef091f3aa473fdba6874b65fcb36526d7d851ac9e95856d15` |
 
 ### 2.9 MTP ドラフト層
@@ -279,6 +307,7 @@ set M=E:\StrataOffline\08_mtp\mtp
 Get-FileHash -Algorithm SHA256 E:\StrataOffline\05_engine\strata-windows-x64.zip
 Get-FileHash -Algorithm SHA256 E:\StrataOffline\07_models\IQ2_XS\*.gguf
 Get-FileHash -Algorithm SHA256 E:\StrataOffline\07_models\IQ3_S\*.gguf
+Get-FileHash -Algorithm SHA256 E:\StrataOffline\07_models\mmproj-Qwen3.8-Flash-Next-BF16.gguf
 ```
 
 （コマンドプロンプトなら `certutil -hashfile <ファイル> SHA256`）
@@ -405,7 +434,19 @@ robocopy C:\StrataOffline\07_models\IQ3_S C:\Strata-data\models\IQ3_S *.gguf
 
 `C:\StrataOffline` のコピーが不要なら、`robocopy` の代わりに `move` を使えばディスクを倍使わずに済みます。
 
-### 6.3 MTP ドラフト層
+### 6.3 画像エンコーダ（mmproj）
+
+モデルのフォルダではなく、その **1つ上の `C:\Strata-data\models\`** に置き、**`.done` を必ず作ります**。
+
+```bat
+copy C:\StrataOffline\07_models\mmproj-Qwen3.8-Flash-Next-BF16.gguf C:\Strata-data\models\
+type nul > C:\Strata-data\models\mmproj-Qwen3.8-Flash-Next-BF16.gguf.done
+```
+
+モデルの shard とは違い、setup は mmproj の中身を確かめて `.done` を作ることをしません。`.done` が無いと、
+ファイルがあっても Hugging Face から落とし直そうとして止まります。
+
+### 6.4 MTP ドラフト層
 
 ```bat
 robocopy C:\StrataOffline\08_mtp\mtp C:\Strata-data\mtp /E
@@ -414,7 +455,7 @@ robocopy C:\StrataOffline\08_mtp\mtp C:\Strata-data\mtp /E
 `C:\Strata-data\mtp\rt\experts.bin` があれば、setup は MTP の取得をしません。その代わりに SHA-256 の照合
 （オフラインでできます）と、トークン表（`draft_vocab`）の配置だけを行います。
 
-### 6.4 置いたあとの形
+### 6.5 置いたあとの形
 
 ```
 C:\Strata\
@@ -423,6 +464,8 @@ C:\Strata\
   third_party\llama.cpp-3cf0325.zip.done
   setup.py, START-HERE.bat, ...
 C:\Strata-data\
+  models\mmproj-Qwen3.8-Flash-Next-BF16.gguf
+  models\mmproj-Qwen3.8-Flash-Next-BF16.gguf.done
   models\IQ3_S\Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf
   models\IQ3_S\Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf
   mtp\rt\experts.bin   (ほか mtp 一式)
@@ -453,7 +496,7 @@ setup.py は、ダウンロードを最後まで終えたファイルの隣に *
 | ファイル | `.done` | 理由 |
 |---|---|---|
 | `C:\Strata\third_party\llama.cpp-3cf0325.zip` | **必要** | 無いと GitHub から落とそうとして止まる |
-| `C:\Strata-data\models\mmproj-…-BF16.gguf`（画像を使うとき） | **必要** | 無いと Hugging Face から落とそうとして止まる |
+| `C:\Strata-data\models\mmproj-Qwen3.8-Flash-Next-BF16.gguf` | **必要** | 無いと Hugging Face から落とそうとして止まる |
 | モデルの shard（`…-0000N-of-00002.gguf`） | 任意 | setup が中身を確かめて自分で作る |
 | エンジン zip | 不要 | `--prebuilt` のフォルダからコピーされる |
 | MTP（`mtp\`） | 不要 | `rt\experts.bin` があるかどうかで判断される |
@@ -500,21 +543,21 @@ Get-ChildItem C:\Strata-data\models\IQ3_S\*.gguf | ForEach-Object { New-Item -It
 
 ```bat
 cd /d C:\Strata
-START-HERE.bat --family qwen --model IQ2_XS --context 131072 --vision no --yes --no-start --prebuilt C:\StrataOffline\05_engine\
+START-HERE.bat --family qwen --model IQ2_XS --context 204800 --vision yes --yes --no-start --prebuilt C:\StrataOffline\05_engine\
 ```
 
 **タイプB（256 GB / RTX 2000 Ada 16 GB）**
 
 ```bat
 cd /d C:\Strata
-START-HERE.bat --family qwen --model IQ3_S --context 65536 --vision no --yes --no-start --prebuilt C:\StrataOffline\05_engine\
+START-HERE.bat --family qwen --model IQ3_S --context 204800 --vision yes --yes --no-start --prebuilt C:\StrataOffline\05_engine\
 ```
 
 **タイプC（256 GB / 12 GB）**
 
 ```bat
 cd /d C:\Strata
-START-HERE.bat --family qwen --model IQ3_S --context 32768 --vision no --yes --no-start --prebuilt C:\StrataOffline\05_engine\
+START-HERE.bat --family qwen --model IQ3_S --context 204800 --vision yes --yes --no-start --prebuilt C:\StrataOffline\05_engine\
 ```
 
 オプションの意味:
@@ -523,7 +566,7 @@ START-HERE.bat --family qwen --model IQ3_S --context 32768 --vision no --yes --n
 |---|---|
 | `--family qwen` | Qwen3.8-Flash-Next 本体 |
 | `--model` / `--context` | [1](#1-pc-ごとのモデルと設定) の表のとおり |
-| `--vision no` | 画像を使わない（mmproj を探しに行かない） |
+| `--vision yes` | 画像を使う。エンコーダは GPU で動く（`C:\Strata-data\models\` の mmproj と `.done` が必要） |
 | `--yes` | 残りの質問は推奨の答えで進める（KV キャッシュは 8-bit、実験的機能はオフ） |
 | `--no-start` | インストールだけして起動しない（次の `--calibrate` のため） |
 | `--prebuilt <フォルダ>` | エンジン zip をこのフォルダからコピーする |
@@ -534,7 +577,14 @@ START-HERE.bat --family qwen --model IQ3_S --context 32768 --vision no --yes --n
 - `Strata engine copied` と `could not get a SHA-256 for strata-windows-x64.zip from GitHub ... NOT verified.
   Installing it as it is.`: ローカルフォルダを指定したときの想定どおりの動作です（[3](#3-sha-256-を確かめる) で確認済みなら問題ありません）
 - `llama.cpp source already downloaded`: `.done` が効いています
+- `images: on`
+- `KV streaming on: the context's KV cache lives in RAM (2.8 GB), more experts fit in VRAM`
+  （判定に使うのは搭載 RAM の総量で、空き容量ではありません。3タイプとも条件を満たすので `KV streaming off: ...` は
+  出ないはずです。出た場合は、Windows が認識している RAM の量を確かめてください。`--kv-streaming on` を足すと、
+  判定に関係なく有効にできます）
 - `model files present`
+- `vision encoder already downloaded` と `vision encoder: C:\Strata-data\models\mmproj-Qwen3.8-Flash-Next-BF16.gguf`:
+  mmproj の `.done` が効いています
 - `MTP draft layer: C:\Strata-data\mtp\rt`
 - 最後に `All set.`
 
@@ -542,6 +592,11 @@ START-HERE.bat --family qwen --model IQ3_S --context 32768 --vision no --yes --n
 空く」という提案が出ます。これは提案だけで、設定は変わりません。既定の `cjk` は日本語・中国語・韓国語を含むので、
 **日本語で使うなら既定のままにしてください**。英語とコードしか使わない場合や、起動時に
 "the draft head does not fit" と出て止まる場合だけ、`--draft-vocab en` を検討してください。
+
+**タイプC だけの表示（画像）**: VRAM が 12.5 GB 以下で画像を GPU で処理する場合、setup は次の提案（tip）を出します。
+「画像のリクエストが止まるようなら `--vram-reserve-mib 1000` で setup をやり直す」。これも提案だけで、設定は
+変わりません。実際に画像のリクエストが止まったときだけ、8.1 のコマンドに `--vram-reserve-mib 1000` を足して
+もう一度実行してください。足すと VRAM が少し多く空くので、文章の出力はわずかに遅くなります。
 
 ### 8.2 自動チューニング（PC ごとに必ず実行）
 
@@ -616,21 +671,5 @@ START-HERE.bat
 | `… is longer than its tensor` / shard の長さのエラー | モデルのコピーが壊れている。SHA-256 を確かめ、コピーし直して `.done` を消す |
 | `some MTP tensors are not the checkpoint's` | MTP のコピーが壊れている（setup は取り直そうとして失敗する）。オンラインPCで `mtp_fetch.py verify` が通る `mtp\` を運び直す |
 | 起動時に `the draft head does not fit` | VRAM 不足。`START-HERE.bat --draft-vocab en` で起動する（日本語の下書きは弱くなる） |
-
-## 付録B: 画像を使う場合
-
-1. オンラインPCで mmproj を落とします（907,543,008 バイト、SHA-256 `b1a82259702816a5330d7bd7607cd9676b11780e79ff7348c21103ff3ce49bd0`）。
-
-   ```bat
-   curl -L -C - -o E:\StrataOffline\07_models\mmproj-Qwen3.8-Flash-Next-BF16.gguf %R%/mmproj-Qwen3.8-Flash-Next-BF16.gguf
-   ```
-
-2. オフラインPCで、モデルのフォルダの **1つ上**（`C:\Strata-data\models\`）に置き、**`.done` を作ります**。
-
-   ```bat
-   copy C:\StrataOffline\07_models\mmproj-Qwen3.8-Flash-Next-BF16.gguf C:\Strata-data\models\
-   type nul > C:\Strata-data\models\mmproj-Qwen3.8-Flash-Next-BF16.gguf.done
-   ```
-
-3. setup の `--vision no` を `--vision yes` に変えて実行します。画像エンコーダが VRAM を約 1.4 GB 使うので、
-   GPU に載るエキスパートが減り、文章の出力は数 % 遅くなります。
+| `vision encoder` のところで `cannot reach huggingface.co` | mmproj が `C:\Strata-data\models\` に無いか、`.done` が無い（[6.3](#63-画像エンコーダmmproj)） |
+| 画像のリクエストが止まる（12 GB の GPU） | 8.1 のコマンドに `--vram-reserve-mib 1000` を足して setup をやり直す |
